@@ -1,6 +1,6 @@
 sebelum nonton vidio tutorial buat akun:
-github.com
-.
+github.com 
+dan 
 https://www.netlify.com
 
 lalu cara instalasi bisa cek vidio youtube:
