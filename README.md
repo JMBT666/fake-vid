@@ -12,7 +12,7 @@ Before starting, make sure you have accounts with the following platforms:
 ## Installation Guide
 
 1. First, watch this tutorial video for installation steps:  
-   [How to Install and Set Up](https://youtu.be/fmJVKwTwp3o?si=grjMLMebzAf3jPgc)
+   [How to Install and Set Up](https://www.youtube.com/watch?v=fmJVKwTwp3o)
 
 2. After following the video tutorial, make sure you have the following details set up:
 
