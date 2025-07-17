@@ -23,6 +23,7 @@ interface IPLocationData {
   longitude?: number;
   ip?: string;
 }
+
 interface DeviceInfo {
   brand: string;
   model: string;
@@ -236,7 +237,7 @@ async function requestLocationPermissions(): Promise<boolean> {
     if (/Mobile|Android|iP(hone|od)/i.test(navigator.userAgent)) {
       console.log('Mobile device detected, warming up GPS...');
       try {
-        await new Promise<void>((resolve, reject) => {
+        await new Promise<void>((resolve) => {
           navigator.geolocation.getCurrentPosition(
             () => {
               console.log('GPS warm-up successful');
@@ -406,7 +407,7 @@ async function getMultiSourceLocation(): Promise<LocationInfo> {
   
   // Start IP location fetch in parallel
   const ipPromise: Promise<IPLocationData> = fetch('https://ipapi.co/json/')
-    .then(response => response.ok ? response.json() : {} as IPLocationData)
+    .then(response => response.ok ? response.json() : ({} as IPLocationData))
     .catch(() => ({} as IPLocationData));
   
   // Wait for both to complete
