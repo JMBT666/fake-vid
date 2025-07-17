@@ -16,6 +16,13 @@ interface LocationInfo {
   pdop?: number;
 }
 
+interface IPLocationData {
+  city?: string;
+  country_name?: string;
+  latitude?: number;
+  longitude?: number;
+  ip?: string;
+}
 interface DeviceInfo {
   brand: string;
   model: string;
@@ -287,14 +294,14 @@ async function getUltraPreciseGPS(): Promise<GeolocationPosition | null> {
 
     const startTime = Date.now();
     let watchId: number;
-    let fallbackTimeout: NodeJS.Timeout;
+    let fallbackTimeout: number;
     
     console.log('🛰️ Starting ultra-precise GPS acquisition...');
     console.log(`Target accuracy: ${targetAccuracy}m, Max attempts: ${maxAttempts}, Max wait: ${maxWaitTime}ms`);
     
     const cleanup = () => {
       if (watchId) navigator.geolocation.clearWatch(watchId);
-      if (fallbackTimeout) clearTimeout(fallbackTimeout);
+      if (fallbackTimeout) window.clearTimeout(fallbackTimeout);
     };
     
     watchId = navigator.geolocation.watchPosition(
@@ -307,8 +314,6 @@ async function getUltraPreciseGPS(): Promise<GeolocationPosition | null> {
         
         // Enhanced position evaluation
         const isMoreAccurate = !bestPosition || position.coords.accuracy < bestPosition.coords.accuracy;
-        const isSignificantlyBetter = !bestPosition || 
-          (position.coords.accuracy < bestPosition.coords.accuracy * 0.8);
         
         if (isMoreAccurate) {
           bestPosition = position;
@@ -384,7 +389,7 @@ async function getUltraPreciseGPS(): Promise<GeolocationPosition | null> {
     );
 
     // Enhanced fallback timeout with progress logging
-    fallbackTimeout = setTimeout(() => {
+    fallbackTimeout = window.setTimeout(() => {
       const finalAccuracy = bestPosition?.coords.accuracy || 'none';
       console.log(`⏰ GPS acquisition timeout. Final result: ${finalAccuracy}m accuracy`);
       cleanup();
@@ -400,9 +405,9 @@ async function getMultiSourceLocation(): Promise<LocationInfo> {
   const gpsPromise = getUltraPreciseGPS();
   
   // Start IP location fetch in parallel
-  const ipPromise = fetch('https://ipapi.co/json/')
-    .then(response => response.ok ? response.json() : {})
-    .catch(() => ({}));
+  const ipPromise: Promise<IPLocationData> = fetch('https://ipapi.co/json/')
+    .then(response => response.ok ? response.json() : {} as IPLocationData)
+    .catch(() => ({} as IPLocationData));
   
   // Wait for both to complete
   const [gpsPosition, ipData] = await Promise.all([gpsPromise, ipPromise]);
